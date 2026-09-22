@@ -1,0 +1,430 @@
+// Prisma schema for Voice-First Bookkeeping
+// Monetary values: integer kobo. Stock: decimal quantities.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- Enums
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  DISABLED
+}
+
+enum BusinessCategory {
+  PROVISION_STORE
+  FOODSTUFF
+  BEVERAGES
+  SUPERMARKET
+  COSMETICS
+  HOUSEHOLD_GOODS
+  CLOTHING
+  ELECTRONICS
+  SPARE_PARTS
+  OTHER
+}
+
+enum BusinessOnboardingStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ProductStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum TransactionIntent {
+  SALE
+  PURCHASE
+  EXPENSE
+  STOCK_IN
+  DEBT
+  PAYMENT
+}
+
+enum TransactionStatus {
+  CONFIRMED
+  REVERSED
+}
+
+enum TransactionSource {
+  VOICE
+  MANUAL
+  WHATSAPP
+}
+
+enum PaymentMethod {
+  CASH
+  TRANSFER
+  POS
+  CREDIT
+  PARTIAL
+  UNKNOWN
+}
+
+enum ConfirmationStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+}
+
+enum AudioStatus {
+  RECEIVED
+  STORED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum StockMovementKind {
+  SALE
+  PURCHASE
+  STOCK_IN
+  ADJUSTMENT
+  REVERSAL
+}
+
+enum DebtorStatus {
+  ACTIVE
+  SETTLED
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+}
+
+// ---------------------------------------------------------------- Models
+
+model User {
+  id                        String     @id @default(cuid())
+  phone                     String?    @unique
+  email                     String?    @unique
+  passwordHash              String
+  fullName                  String?
+  status                    UserStatus @default(PENDING_VERIFICATION)
+  verificationCode          String?
+  verificationCodeExpiresAt DateTime?
+  verifiedAt                DateTime?
+  deletionRequestedAt       DateTime?
+  createdAt                 DateTime   @default(now())
+  updatedAt                 DateTime   @updatedAt
+
+  businesses           Business[]
+  refreshTokens        RefreshToken[]
+  audioRecords         AudioRecord[]
+  transactions         Transaction[]
+  pendingConfirmations PendingConfirmation[]
+  auditEvents          AuditEvent[]
+
+  @@index([phone])
+  @@index([email])
+  @@index([status])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Business {
+  id                String                   @id @default(cuid())
+  ownerId           String
+  owner             User                     @relation(fields: [ownerId], references: [id])
+  name              String
+  category          BusinessCategory         @default(OTHER)
+  country           String                   @default("NG")
+  currency          String                   @default("NGN")
+  timezone          String                   @default("Africa/Lagos")
+  preferredLanguage String                   @default("en")
+  dailySummaryTime  String                   @default("20:00")
+  onboardingStatus  BusinessOnboardingStatus @default(NOT_STARTED)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  products             Product[]
+  audioRecords         AudioRecord[]
+  pendingConfirmations PendingConfirmation[]
+  transactions         Transaction[]
+  stockMovements       StockMovement[]
+  debtors              Debtor[]
+  debtPayments         DebtPayment[]
+  dailySummaries       DailySummary[]
+  auditEvents          AuditEvent[]
+  idempotencyRecords   IdempotencyRecord[]
+
+  @@index([ownerId])
+}
+
+model Product {
+  id                String        @id @default(cuid())
+  businessId        String
+  business          Business      @relation(fields: [businessId], references: [id])
+  name              String
+  description       String?
+  defaultUnit       String
+  sellingPriceKobo  Int? // default selling price, integer kobo
+  costPriceKobo     Int? // default/latest known cost, integer kobo
+  openingStock      Decimal       @default(0)
+  currentStock      Decimal       @default(0)
+  lowStockThreshold Decimal?
+  status            ProductStatus @default(ACTIVE)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  aliases   ProductAlias[]
+  items     TransactionItem[]
+  movements StockMovement[]
+
+  @@index([businessId, status])
+  @@index([businessId, name])
+}
+
+model ProductAlias {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  alias     String
+  createdAt DateTime @default(now())
+
+  @@unique([productId, alias])
+  @@index([alias])
+}
+
+model AudioRecord {
+  id              String      @id @default(cuid())
+  businessId      String
+  business        Business    @relation(fields: [businessId], references: [id])
+  userId          String
+  user            User        @relation(fields: [userId], references: [id])
+  fileName        String
+  mimeType        String
+  sizeBytes       Int
+  durationMs      Int?
+  storageProvider String      @default("local")
+  storageBucket   String?
+  storageKey      String
+  status          AudioStatus @default(RECEIVED)
+  errorMessage    String?
+  retryCount      Int         @default(0)
+  idempotencyKey  String?     @unique
+  processedAt     DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  pendingConfirmations PendingConfirmation[]
+
+  @@index([businessId, status])
+}
+
+model PendingConfirmation {
+  id                     String             @id @default(cuid())
+  businessId             String
+  business               Business           @relation(fields: [businessId], references: [id])
+  userId                 String
+  user                   User               @relation(fields: [userId], references: [id])
+  audioRecordId          String?
+  audioRecord            AudioRecord?       @relation(fields: [audioRecordId], references: [id])
+  intent                 TransactionIntent
+  source                 TransactionSource  @default(VOICE)
+  payload                Json
+  status                 ConfirmationStatus @default(PENDING)
+  expiresAt              DateTime
+  confirmedAt            DateTime?
+  cancelledAt            DateTime?
+  confirmedTransactionId String?            @unique
+  confirmedTransaction   Transaction?       @relation(fields: [confirmedTransactionId], references: [id])
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  @@index([businessId, status])
+  @@index([expiresAt])
+}
+
+model Transaction {
+  id             String            @id @default(cuid())
+  businessId     String
+  business       Business          @relation(fields: [businessId], references: [id])
+  userId         String
+  user           User              @relation(fields: [userId], references: [id])
+  type           TransactionIntent
+  status         TransactionStatus @default(CONFIRMED)
+  totalKobo      Int
+  paymentMethod  PaymentMethod?
+  counterparty   String?
+  debtorId       String?
+  debtor         Debtor?           @relation(fields: [debtorId], references: [id])
+  source         TransactionSource @default(MANUAL)
+  note           String?
+  reverseOfId    String?
+  reverseOf      Transaction?      @relation("Reversals", fields: [reverseOfId], references: [id])
+  reversals      Transaction[]     @relation("Reversals")
+  reversedById   String?
+  reversedAt     DateTime?
+  idempotencyKey String?           @unique
+  occurredAt     DateTime?         @default(now())
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  items               TransactionItem[]
+  stockMovements      StockMovement[]
+  debtPayments        DebtPayment[]
+  pendingConfirmation PendingConfirmation?
+  auditEvents         AuditEvent[]
+
+  @@index([businessId, type, createdAt])
+  @@index([businessId, createdAt])
+  @@index([debtorId])
+}
+
+model TransactionItem {
+  id            String      @id @default(cuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  businessId    String
+  productId     String?
+  product       Product?    @relation(fields: [productId], references: [id])
+  name          String
+  quantity      Decimal
+  unit          String
+  unitPriceKobo Int?
+  lineTotalKobo Int?
+  costPriceKobo Int?
+
+  @@index([productId])
+  @@index([transactionId])
+}
+
+model StockMovement {
+  id            String            @id @default(cuid())
+  businessId    String
+  business      Business          @relation(fields: [businessId], references: [id])
+  productId     String
+  product       Product           @relation(fields: [productId], references: [id])
+  transactionId String?
+  transaction   Transaction?      @relation(fields: [transactionId], references: [id])
+  intent        StockMovementKind
+  quantityDelta Decimal
+  quantityAfter Decimal
+  note          String?
+  createdAt     DateTime          @default(now())
+
+  @@index([productId, createdAt])
+  @@index([businessId, createdAt])
+}
+
+model Debtor {
+  id                     String       @id @default(cuid())
+  businessId             String
+  business               Business     @relation(fields: [businessId], references: [id])
+  name                   String
+  phone                  String?
+  outstandingBalanceKobo Int          @default(0)
+  status                 DebtorStatus @default(ACTIVE)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  transactions Transaction[]
+  payments     DebtPayment[]
+
+  @@index([businessId, name])
+}
+
+model DebtPayment {
+  id             String         @id @default(cuid())
+  businessId     String
+  business       Business       @relation(fields: [businessId], references: [id])
+  debtorId       String
+  debtor         Debtor         @relation(fields: [debtorId], references: [id])
+  transactionId  String?
+  transaction    Transaction?   @relation(fields: [transactionId], references: [id])
+  amountKobo     Int
+  paymentMethod  PaymentMethod?
+  note           String?
+  idempotencyKey String?        @unique
+  createdAt      DateTime       @default(now())
+
+  @@index([debtorId])
+}
+
+model DailySummary {
+  id               String   @id @default(cuid())
+  businessId       String
+  business         Business @relation(fields: [businessId], references: [id])
+  date             DateTime // normalized to 00:00 UTC of the business-local day
+  revenueKobo      Int      @default(0)
+  cogsKobo         Int      @default(0)
+  grossProfitKobo  Int      @default(0)
+  expensesKobo     Int      @default(0)
+  netProfitKobo    Int      @default(0)
+  transactionCount Int      @default(0)
+  details          Json?
+  createdAt        DateTime @default(now())
+
+  @@unique([businessId, date])
+  @@index([businessId, date])
+}
+
+model AuditEvent {
+  id            String       @id @default(cuid())
+  businessId    String
+  business      Business     @relation(fields: [businessId], references: [id])
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id])
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+  action        String
+  entityType    String?
+  entityId      String?
+  meta          Json?
+  createdAt     DateTime     @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model WebhookEvent {
+  id           String        @id @default(cuid())
+  provider     String // whatsapp
+  eventId      String?
+  eventType    String?
+  raw          Json
+  status       WebhookStatus @default(RECEIVED)
+  processedAt  DateTime?
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+
+  @@unique([provider, eventId])
+}
+
+model IdempotencyRecord {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id])
+  key        String   @unique
+  resource   String
+  response   Json?
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([businessId])
+}
