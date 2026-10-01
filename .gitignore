@@ -14,7 +14,7 @@ coverage/
 .env.*.local
 
 # runtime data
-storage/
+/storage/
 uploads/
 *.log
 npm-debug.log*
